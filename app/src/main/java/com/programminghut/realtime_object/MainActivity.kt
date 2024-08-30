@@ -20,8 +20,25 @@ import org.tensorflow.lite.support.common.FileUtil
 import org.tensorflow.lite.support.image.ImageProcessor
 import org.tensorflow.lite.support.image.TensorImage
 import org.tensorflow.lite.support.image.ops.ResizeOp
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
+import android.view.WindowManager
 
-class MainActivity : AppCompatActivity() {
+class MainActivity : AppCompatActivity(), SensorEventListener {
+
+    data class DetectedObject(
+        var rect: RectF,
+        val label: String,
+        val score: Float,
+        var initialAzimuth: Float,
+        var initialPitch: Float
+    )
+
+    private val detectedObjects = mutableListOf<DetectedObject>()
+    private var currentAzimuth: Float = 0f
+    private var currentPitch: Float = 0f
 
     lateinit var labels:List<String>
     var colors = listOf<Int>(
@@ -36,6 +53,10 @@ class MainActivity : AppCompatActivity() {
     lateinit var cameraManager: CameraManager
     lateinit var textureView: TextureView
     lateinit var model:SsdMobilenetV11Metadata1
+
+    private lateinit var sensorManager: SensorManager
+    private val rotationMatrix = FloatArray(9)
+    private val orientationAngles = FloatArray(3)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -72,7 +93,8 @@ class MainActivity : AppCompatActivity() {
                 val locations = outputs.locationsAsTensorBuffer.floatArray
                 val classes = outputs.classesAsTensorBuffer.floatArray
                 val scores = outputs.scoresAsTensorBuffer.floatArray
-                val numberOfDetections = outputs.numberOfDetectionsAsTensorBuffer.floatArray
+
+                detectedObjects.clear() // Clear previous detections
 
                 var mutable = bitmap.copy(Bitmap.Config.ARGB_8888, true)
                 val canvas = Canvas(mutable)
@@ -86,22 +108,50 @@ class MainActivity : AppCompatActivity() {
                     x = index
                     x *= 4
                     if(fl > 0.5){
-                        paint.setColor(colors.get(index))
-                        paint.style = Paint.Style.STROKE
-                        canvas.drawRect(RectF(locations.get(x+1)*w, locations.get(x)*h, locations.get(x+3)*w, locations.get(x+2)*h), paint)
-                        paint.style = Paint.Style.FILL
-                        canvas.drawText(labels.get(classes.get(index).toInt())+" "+fl.toString(), locations.get(x+1)*w, locations.get(x)*h, paint)
+                        val rect = RectF(locations.get(x+1)*w, locations.get(x)*h, locations.get(x+3)*w, locations.get(x+2)*h)
+                        detectedObjects.add(DetectedObject(rect, labels.get(classes.get(index).toInt()), fl, currentAzimuth, currentPitch))
                     }
                 }
 
+                drawDetectedObjects(canvas)
+
                 imageView.setImageBitmap(mutable)
-
-
             }
         }
 
         cameraManager = getSystemService(Context.CAMERA_SERVICE) as CameraManager
+        sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
 
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+    }
+
+    private fun drawDetectedObjects(canvas: Canvas) {
+        detectedObjects.forEachIndexed { index, obj ->
+            paint.setColor(colors[index % colors.size])
+            paint.style = Paint.Style.STROKE
+
+            val adjustedRect = adjustRectPosition(obj)
+            canvas.drawRect(adjustedRect, paint)
+
+            paint.style = Paint.Style.FILL
+            canvas.drawText("${obj.label} ${obj.score}", adjustedRect.left, adjustedRect.top, paint)
+        }
+    }
+
+    private fun adjustRectPosition(obj: DetectedObject): RectF {
+        val deltaAzimuth = currentAzimuth - obj.initialAzimuth
+        val deltaPitch = currentPitch - obj.initialPitch
+
+        // You may need to adjust these factors to get the desired effect
+        val adjustX = deltaAzimuth * obj.rect.width() * 0.1f
+        val adjustY = deltaPitch * obj.rect.height() * 0.1f
+
+        return RectF(
+            obj.rect.left - adjustX,
+            obj.rect.top - adjustY,
+            obj.rect.right - adjustX,
+            obj.rect.bottom - adjustY
+        )
     }
 
     override fun onDestroy() {
@@ -131,11 +181,9 @@ class MainActivity : AppCompatActivity() {
             }
 
             override fun onDisconnected(p0: CameraDevice) {
-
             }
 
             override fun onError(p0: CameraDevice, p1: Int) {
-
             }
         }, handler)
     }
@@ -145,6 +193,7 @@ class MainActivity : AppCompatActivity() {
             requestPermissions(arrayOf(android.Manifest.permission.CAMERA), 101)
         }
     }
+
     override fun onRequestPermissionsResult(
         requestCode: Int,
         permissions: Array<out String>,
@@ -153,6 +202,39 @@ class MainActivity : AppCompatActivity() {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if(grantResults[0] != PackageManager.PERMISSION_GRANTED){
             get_permission()
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)?.also { rotationSensor ->
+            sensorManager.registerListener(
+                this,
+                rotationSensor,
+                SensorManager.SENSOR_DELAY_NORMAL
+            )
+        }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        sensorManager.unregisterListener(this)
+    }
+
+    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {
+        // Do nothing
+    }
+
+    override fun onSensorChanged(event: SensorEvent) {
+        if (event.sensor.type == Sensor.TYPE_ROTATION_VECTOR) {
+            SensorManager.getRotationMatrixFromVector(rotationMatrix, event.values)
+            SensorManager.getOrientation(rotationMatrix, orientationAngles)
+
+            currentAzimuth = Math.toDegrees(orientationAngles[0].toDouble()).toFloat()
+            currentPitch = Math.toDegrees(orientationAngles[1].toDouble()).toFloat()
+
+            // Request a redraw of the image view
+            imageView.invalidate()
         }
     }
 }
